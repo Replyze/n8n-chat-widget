@@ -1,0 +1,354 @@
+{
+  "name": "Replyze: new lead to Google Sheets",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "replyze-new-lead",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "61f2a8b1-e49f-4a68-a74d-718a3dcb2094",
+      "name": "Replyze webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        300
+      ],
+      "webhookId": "0cedb10e-a838-49e3-a548-20a6ebbee088"
+    },
+    {
+      "parameters": {
+        "operation": "text",
+        "binaryPropertyName": "data",
+        "destinationKey": "rawBody",
+        "options": {
+          "encoding": "utf8",
+          "stripBOM": false,
+          "keepSource": "both"
+        }
+      },
+      "id": "5178793b-66a1-4662-a46b-6926a11b5582",
+      "name": "Raw body",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "action": "hmac",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "type": "SHA256",
+        "dataPropertyName": "expectedSignature",
+        "encoding": "hex"
+      },
+      "id": "11c040c2-fe64-4c2f-a86d-63a87a7a6464",
+      "name": "Sign the raw body",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "credentials": {
+        "crypto": {
+          "id": "replyzeSecretLeads",
+          "name": "Replyze webhook secret: leads"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Replyze signs only the raw body: X-Replyze-Signature is \"sha256=\" and the hex\n// HMAC-SHA256 of the exact bytes received, keyed with this webhook's signing\n// secret. \"Sign the raw body\" computed that HMAC over the same bytes.\n// X-Replyze-Timestamp and X-Replyze-Event-Id are unsigned copies of the body's\n// created_at and id: anyone who captured a request can send it again with new\n// values in them. So this node reads the time and the id from the signed body.\nconst MAX_AGE_SECONDS = 300;\n\nconst item = $input.first().json;\nconst answer = (status, handle, response, extra = {}) => [{ json: { status, handle, response, ...extra } }];\n\n// 1. The signature, compared as bytes and in constant time: every byte of the\n//    expected value is checked, whatever the first difference.\nconst bytes = (text) => new TextEncoder().encode(text);\nconst expected = bytes('sha256=' + item.expectedSignature);\nconst header = (item.headers || {})['x-replyze-signature'];\nconst given = typeof header === 'string' ? bytes(header) : new Uint8Array(0);\nlet difference = expected.length ^ given.length;\nfor (let i = 0; i < expected.length; i++) {\n  difference |= expected[i] ^ (i < given.length ? given[i] : 0);\n}\nif (difference !== 0) {\n  return answer(401, false, { error: 'The signature does not match.' });\n}\n\n// 2. Signed, so the body can be trusted: parse the exact bytes that were\n//    signed (\"Raw body\") and take the time from them.\nlet event = null;\ntry {\n  event = JSON.parse(item.rawBody);\n} catch (error) {\n  event = null;\n}\nconst now = Date.now();\nconst sentAt = event && typeof event.created_at === 'string' ? Date.parse(event.created_at) : NaN;\nif (!Number.isFinite(sentAt) || Math.abs(now - sentAt) > MAX_AGE_SECONDS * 1000) {\n  return answer(400, false, { error: 'Too old: the event was not created in the last ' + MAX_AGE_SECONDS + ' seconds.' });\n}\n\n// 3. The id, from the body too. An event this workflow has already taken\n//    (Replyze's retry, or a replay) gets 200 and goes no further. The ids are\n//    kept in the workflow's static data for as long as step 2 would let the\n//    event in. n8n saves static data when a run of the published workflow ends.\nconst id = typeof event.id === 'string' ? event.id : '';\nif (id === '') {\n  return answer(400, false, { error: 'The event has no id.' });\n}\nconst memory = $getWorkflowStaticData('global');\nconst seen = {};\nfor (const [key, until] of Object.entries(memory.replyzeEventIds || {})) {\n  if (until >= now) seen[key] = until;\n}\nif (Object.prototype.hasOwnProperty.call(seen, id)) {\n  return answer(200, false, { received: true, duplicate: true }, { eventId: id });\n}\nseen[id] = sentAt + MAX_AGE_SECONDS * 1000;\nmemory.replyzeEventIds = seen;\n\nreturn answer(200, true, { received: true }, { eventId: id, body: event });"
+      },
+      "id": "7d25972b-e617-42da-ac82-0da0ba9fce6f",
+      "name": "Check signature, age and id",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.response) }}",
+        "options": {
+          "responseCode": "={{ $json.status }}"
+        }
+      },
+      "id": "0ec03010-b6b1-4e5e-a7fe-dbedad162426",
+      "name": "Answer Replyze",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "67853652-5acb-4c64-a4cc-f7c53011a05c",
+              "leftValue": "={{ $json.handle }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "b0c67caa-328a-4d7b-a7ed-f63255afb7c3",
+      "name": "Handle it?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Signature, age and duplicates\nOnly the raw body is signed. *Check signature, age and id* compares the HMAC with `X-Replyze-Signature` (bytes, constant time), then reads `created_at` and `id` from that signed body, never from the unsigned `X-Replyze-Timestamp` / `X-Replyze-Event-Id` headers.\n*Answer Replyze*: **401** bad signature, **400** older than 5 minutes, **200** for a duplicate (stops here) and for a new event (goes on).",
+        "width": 640,
+        "height": 220,
+        "color": 7
+      },
+      "id": "bf6b86c5-68a1-42d1-a4eb-e3cb779d3497",
+      "name": "Note: replyze-new-leadverify",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -20,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "268467ac-fda7-428e-a2dc-764f0103d959",
+              "leftValue": "={{ ['contact.created', 'contact.updated'].includes($json.body.event) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "461658df-a289-4f1a-a708-2e0f5cd960dd",
+      "name": "Contact event?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1100,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// contact.created: a contact with a name, email or phone (an anonymous\n// visitor counts from the moment they give one in the chat).\n// contact.updated: a known contact's details changed.\nconst contact = $input.first().json.body.data.contact;\nconst list = (value) => Array.isArray(value) ? value.join(', ') : '';\n\nreturn [{\n  json: {\n    'Replyze ID': contact.id,\n    Name: contact.name || '',\n    Email: contact.email || '',\n    Phone: contact.phone || '',\n    Company: contact.company || '',\n    'Job title': contact.job_title || '',\n    City: contact.city || '',\n    Country: contact.country || '',\n    Language: contact.language || '',\n    Tags: list(contact.tags),\n    'First seen': contact.created_at || '',\n    Updated: contact.updated_at || '',\n  },\n}];"
+      },
+      "id": "71f05368-bfab-43d9-a1f2-77fc82433a7a",
+      "name": "Row for the sheet",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "mode": "url",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Leads"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "Replyze ID"
+          ],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "fad160f0-3f20-453c-ac66-25f68e6579a8",
+      "name": "Add or update the lead",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1540,
+        160
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "googleSheetsAccount",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## New lead → Google Sheets\n\nEvery visitor who leaves a name, email or phone in your **Replyze chat widget** becomes a row in a Google Sheet; when their details change, the row is updated.\n\n**Set up**\n1. Make a Google Sheet with a tab named **Leads** and this header row: `Replyze ID, Name, Email, Phone, Company, Job title, City, Country, Language, Tags, First seen, Updated`.\n2. In **Add or update the lead**, connect your Google account and paste the sheet's URL.\n3. Publish this workflow and copy the Production URL of \"Replyze webhook\".\n4. In Replyze → Settings → Integrations → Developer, **Add Webhook** with that URL and the events `contact.created` and `contact.updated`. Put its signing secret in **Replyze webhook secret: leads** (Crypto, \"Hmac Secret\").\n\nNo Replyze API key needed: the webhook carries the contact.",
+        "width": 620,
+        "height": 460,
+        "color": 4
+      },
+      "id": "7013af4c-42fe-4380-aa9e-8b0affc4f521",
+      "name": "Note: Setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -260
+      ]
+    }
+  ],
+  "connections": {
+    "Replyze webhook": {
+      "main": [
+        [
+          {
+            "node": "Raw body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Raw body": {
+      "main": [
+        [
+          {
+            "node": "Sign the raw body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sign the raw body": {
+      "main": [
+        [
+          {
+            "node": "Check signature, age and id",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check signature, age and id": {
+      "main": [
+        [
+          {
+            "node": "Answer Replyze",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Answer Replyze": {
+      "main": [
+        [
+          {
+            "node": "Handle it?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle it?": {
+      "main": [
+        [
+          {
+            "node": "Contact event?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Contact event?": {
+      "main": [
+        [
+          {
+            "node": "Row for the sheet",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Row for the sheet": {
+      "main": [
+        [
+          {
+            "node": "Add or update the lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": true
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

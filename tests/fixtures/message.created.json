@@ -1,0 +1,31 @@
+{
+  "message": {
+    "id": 48213,
+    "conversation_id": 4812,
+    "sender_type": "visitor",
+    "sender": null,
+    "type": "text",
+    "content": "Hi! How long does shipping to Austria take?",
+    "attachments": [],
+    "ai_generated": false,
+    "created_at": "2026-11-13T09:41:07.512000Z"
+  },
+  "conversation": {
+    "id": 4812,
+    "status": "open",
+    "priority": "normal",
+    "subject": null,
+    "channel": "web",
+    "url": "https://client.replyze.chat/1/inbox?conversation=4812",
+    "contact": {
+      "id": 2291,
+      "name": "Jana Novak",
+      "email": "jana@example.com",
+      "phone": null
+    },
+    "assigned_agent": null,
+    "assigned_team": null,
+    "created_at": "2026-11-13T09:40:51.000000Z",
+    "resolved_at": null
+  }
+}

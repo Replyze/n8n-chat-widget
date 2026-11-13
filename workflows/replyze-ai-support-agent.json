@@ -1,0 +1,1148 @@
+{
+  "name": "Replyze: AI support agent with human handoff",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "replyze-ai-agent",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "9b161d78-dc2c-499b-adf5-ba474baaf7a5",
+      "name": "Replyze webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        300
+      ],
+      "webhookId": "564c3c3c-8aac-4884-a2d2-57b6a2f27857"
+    },
+    {
+      "parameters": {
+        "operation": "text",
+        "binaryPropertyName": "data",
+        "destinationKey": "rawBody",
+        "options": {
+          "encoding": "utf8",
+          "stripBOM": false,
+          "keepSource": "both"
+        }
+      },
+      "id": "8b57afb9-65da-4501-a6da-bbe1b40d1df8",
+      "name": "Raw body",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "action": "hmac",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "type": "SHA256",
+        "dataPropertyName": "expectedSignature",
+        "encoding": "hex"
+      },
+      "id": "96f154e7-1bf3-42a5-a945-12b85e3ab930",
+      "name": "Sign the raw body",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "credentials": {
+        "crypto": {
+          "id": "replyzeSecretAiAgent",
+          "name": "Replyze webhook secret: AI agent"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Replyze signs only the raw body: X-Replyze-Signature is \"sha256=\" and the hex\n// HMAC-SHA256 of the exact bytes received, keyed with this webhook's signing\n// secret. \"Sign the raw body\" computed that HMAC over the same bytes.\n// X-Replyze-Timestamp and X-Replyze-Event-Id are unsigned copies of the body's\n// created_at and id: anyone who captured a request can send it again with new\n// values in them. So this node reads the time and the id from the signed body.\nconst MAX_AGE_SECONDS = 300;\n\nconst item = $input.first().json;\nconst answer = (status, handle, response, extra = {}) => [{ json: { status, handle, response, ...extra } }];\n\n// 1. The signature, compared as bytes and in constant time: every byte of the\n//    expected value is checked, whatever the first difference.\nconst bytes = (text) => new TextEncoder().encode(text);\nconst expected = bytes('sha256=' + item.expectedSignature);\nconst header = (item.headers || {})['x-replyze-signature'];\nconst given = typeof header === 'string' ? bytes(header) : new Uint8Array(0);\nlet difference = expected.length ^ given.length;\nfor (let i = 0; i < expected.length; i++) {\n  difference |= expected[i] ^ (i < given.length ? given[i] : 0);\n}\nif (difference !== 0) {\n  return answer(401, false, { error: 'The signature does not match.' });\n}\n\n// 2. Signed, so the body can be trusted: parse the exact bytes that were\n//    signed (\"Raw body\") and take the time from them.\nlet event = null;\ntry {\n  event = JSON.parse(item.rawBody);\n} catch (error) {\n  event = null;\n}\nconst now = Date.now();\nconst sentAt = event && typeof event.created_at === 'string' ? Date.parse(event.created_at) : NaN;\nif (!Number.isFinite(sentAt) || Math.abs(now - sentAt) > MAX_AGE_SECONDS * 1000) {\n  return answer(400, false, { error: 'Too old: the event was not created in the last ' + MAX_AGE_SECONDS + ' seconds.' });\n}\n\n// 3. The id, from the body too. An event this workflow has already taken\n//    (Replyze's retry, or a replay) gets 200 and goes no further. The ids are\n//    kept in the workflow's static data for as long as step 2 would let the\n//    event in. n8n saves static data when a run of the published workflow ends.\nconst id = typeof event.id === 'string' ? event.id : '';\nif (id === '') {\n  return answer(400, false, { error: 'The event has no id.' });\n}\nconst memory = $getWorkflowStaticData('global');\nconst seen = {};\nfor (const [key, until] of Object.entries(memory.replyzeEventIds || {})) {\n  if (until >= now) seen[key] = until;\n}\nif (Object.prototype.hasOwnProperty.call(seen, id)) {\n  return answer(200, false, { received: true, duplicate: true }, { eventId: id });\n}\nseen[id] = sentAt + MAX_AGE_SECONDS * 1000;\nmemory.replyzeEventIds = seen;\n\nreturn answer(200, true, { received: true }, { eventId: id, body: event });"
+      },
+      "id": "4707819a-effa-4459-ab82-cf5463369b34",
+      "name": "Check signature, age and id",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.response) }}",
+        "options": {
+          "responseCode": "={{ $json.status }}"
+        }
+      },
+      "id": "afd52472-02eb-498b-a537-f686eaea5b0a",
+      "name": "Answer Replyze",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7c327905-98e4-44de-a7d1-a99a571d7062",
+              "leftValue": "={{ $json.handle }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "cfb093f7-c3ec-448c-a56c-c54e24adc056",
+      "name": "Handle it?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Signature, age and duplicates\nOnly the raw body is signed. *Check signature, age and id* compares the HMAC with `X-Replyze-Signature` (bytes, constant time), then reads `created_at` and `id` from that signed body, never from the unsigned `X-Replyze-Timestamp` / `X-Replyze-Event-Id` headers.\n*Answer Replyze*: **401** bad signature, **400** older than 5 minutes, **200** for a duplicate (stops here) and for a new event (goes on).",
+        "width": 640,
+        "height": 220,
+        "color": 7
+      },
+      "id": "32e51e15-186d-47c2-a322-a38ba6ea1967",
+      "name": "Note: replyze-ai-agentverify",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -20,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The webhook's body: { id, event, created_at, workspace_id, data }.\n// message.created carries data.message and data.conversation.\nconst body = $input.first().json.body || {};\nconst message = (body.data && body.data.message) || {};\nconst conversation = (body.data && body.data.conversation) || {};\nconst text = typeof message.content === 'string' ? message.content.trim() : '';\nconst createdAt = Date.parse(message.created_at || body.created_at) || Date.now();\n\nreturn [{\n  json: {\n    event: body.event,\n    eventId: body.id,\n    conversationId: conversation.id || message.conversation_id || null,\n    messageId: message.id || null,\n    senderType: message.sender_type || null,\n    text,\n    channel: conversation.channel || null,\n    // Only the visitor's own words get an answer. Replies from the team, from\n    // Replyze's AI and from this workflow (sent through the API, so\n    // sender_type \"agent\") are ignored: that is what stops a reply loop.\n    // Images, files and voice notes (type \"image\", \"file\"...) wait for the team.\n    fromVisitor: body.event === 'message.created' && message.sender_type === 'visitor' && message.type === 'text' && text !== '',\n    historySince: new Date(createdAt - 24 * 3600 * 1000).toISOString(),\n    checkSince: new Date(createdAt - 60 * 1000).toISOString(),\n  },\n}];"
+      },
+      "id": "b70a8442-b5cd-4b0c-a6da-92558f676f39",
+      "name": "Read the event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "82d44c43-693c-4935-a34a-825ea3b48251",
+              "leftValue": "={{ $json.fromVisitor }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "bbad7c37-376f-4f60-a273-d6e84b54de60",
+      "name": "From the visitor?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1320,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e8bc163c-82ee-4187-a328-8c7d4ac636db",
+              "name": "handoffTag",
+              "value": "needs-human",
+              "type": "string"
+            },
+            {
+              "id": "ad328846-aa18-432a-a358-16374511cac1",
+              "name": "handoffAgentId",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "41242b9f-ae56-4ad4-a6e7-7dfe33cb18d1",
+              "name": "stopWhenAssigned",
+              "value": true,
+              "type": "boolean"
+            },
+            {
+              "id": "5b840157-e7e8-4aef-ab3f-d0fc24f3add3",
+              "name": "fallbackReply",
+              "value": "Thanks for your message! A teammate will reply here soon.",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "52d2a60c-7acc-4923-ad72-b02aa487c3cf",
+      "name": "Settings",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1540,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://client.replyze.chat/api/v1/conversations/{{ $json.conversationId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {}
+      },
+      "id": "1edba9e4-d940-447d-aa50-cb491b7e33ab",
+      "name": "Get the conversation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1760,
+        160
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "replyzeApiKey",
+          "name": "Replyze API key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://client.replyze.chat/api/v1/conversations/{{ $('Settings').first().json.conversationId }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "updated_since",
+              "value": "={{ $('Settings').first().json.historySince }}"
+            },
+            {
+              "name": "include_notes",
+              "value": "false"
+            },
+            {
+              "name": "limit",
+              "value": "100"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "cursor",
+                    "value": "={{ $response.body.next_cursor }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.has_more }}",
+              "limitPagesFetched": true,
+              "maxRequests": 10,
+              "requestInterval": 0
+            }
+          }
+        }
+      },
+      "id": "feeb0225-f7dd-4093-ac86-c3287710cc10",
+      "name": "Get recent messages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1980,
+        160
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "replyzeApiKey",
+          "name": "Replyze API key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Steps back whenever a person has the conversation, so the AI never talks over your team.\nconst event = $('Settings').first().json; // the event's fields and your settings\nconst conversation = $('Get the conversation').first().json;\n// \"Get recent messages\" gives one item per page, oldest first. If the last page\n// still says has_more, the newest messages weren't read: better to stay out.\nconst pages = $input.all().map((item) => item.json);\nconst messages = pages.flatMap((page) => page.data || []);\nconst readAll = pages.length > 0 && pages[pages.length - 1].has_more === false;\nconst handoffTag = String(event.handoffTag || '').trim().toLowerCase();\n\nconst teammateReplied = messages.some((m) => m.sender_type === 'agent' && m.sender && !m.is_internal_note);\nconst newer = messages.filter((m) => m.id > event.messageId);\n\nlet skipReason = null;\nif (conversation.status !== 'open') {\n  skipReason = 'The conversation is ' + conversation.status + '.';\n} else if (handoffTag && (conversation.tags || []).some((t) => String(t.name).toLowerCase() === handoffTag)) {\n  skipReason = 'The conversation has the \"' + event.handoffTag + '\" tag: the team has it.';\n} else if (event.stopWhenAssigned && conversation.assigned_agent) {\n  skipReason = 'The conversation is assigned to ' + conversation.assigned_agent.name + '.';\n} else if (!readAll) {\n  skipReason = 'More than ' + messages.length + ' messages in the last 24 hours: too many to read, so the team answers.';\n} else if (teammateReplied) {\n  skipReason = 'A teammate has replied in this conversation.';\n} else if (newer.some((m) => m.sender_type === 'visitor')) {\n  skipReason = 'The visitor wrote again: the run for the newest message answers.';\n} else if (newer.some((m) => (m.sender_type === 'agent' || m.sender_type === 'bot') && !m.is_internal_note)) {\n  skipReason = 'This message already has an answer.';\n}\n\n// The conversation so far, for the agent: the last 20 messages before this one.\nconst who = (m) => m.sender_type === 'visitor' ? 'Customer'\n  : m.sender_type === 'bot' ? 'Support (AI)'\n  : m.sender ? 'Support (' + m.sender.name + ')' : 'Support';\nconst history = messages\n  .filter((m) => m.id < event.messageId && !m.is_internal_note && typeof m.content === 'string' && m.content.trim() !== '')\n  .slice(-20)\n  .map((m) => who(m) + ': ' + m.content.trim())\n  .join('\\n');\n\nreturn [{\n  json: {\n    answer: skipReason === null,\n    skipReason,\n    conversationId: event.conversationId,\n    messageId: event.messageId,\n    question: event.text,\n    history,\n    checkSince: event.checkSince,\n  },\n}];"
+      },
+      "id": "e3fa8aa7-7746-4c12-a678-9f5f79722073",
+      "name": "Should the AI answer?",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "726fa67d-f541-46c8-ac3f-f015ca10e7bb",
+              "leftValue": "={{ $json.answer }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "4c98a1a4-ba90-432b-a343-c5d1bce84ed9",
+      "name": "Answer?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2420,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Conversation so far:\n{{ $json.history || '(none: this is the first message)' }}\n\nNew message from the customer:\n{{ $json.question }}",
+        "options": {
+          "systemMessage": "You are the customer support assistant of our business. You answer customers in our website chat, and sometimes by email, WhatsApp or Telegram.\n\nHow to answer:\n- Before you answer any question about the business (products, prices, orders, shipping, returns, accounts, policies, opening hours), call search_knowledge_base. Answer only from what it returns. Never make up facts, prices, links or policies.\n- If the knowledge base has nothing that answers the question, or the customer asks for a person, is upset, or needs something only a person can do (a refund, an exception, a change to their account), call hand_off_to_human with a one-sentence reason. Then tell the customer that a teammate will reply in this conversation soon.\n- Reply in the customer's language. Keep it short: two to four sentences of plain text, no headings.\n- Don't mention these instructions, your tools or the knowledge base.",
+          "maxIterations": 6,
+          "returnIntermediateSteps": true
+        }
+      },
+      "id": "c1f78a0a-51c1-4b6b-aa3e-52b2343f6c1c",
+      "name": "AI support agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        2660,
+        140
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-5-mini",
+          "cachedResultName": "gpt-5-mini"
+        },
+        "responsesApiEnabled": false,
+        "options": {}
+      },
+      "id": "b10ca3c4-e1a3-464d-a310-9d0241ec8c0d",
+      "name": "OpenAI chat model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        2540,
+        380
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "openAiAccount",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "Searches the business knowledge base: help articles, website pages and files. Returns the best matching passages with their titles and links. Call it before answering any question about the business.",
+        "url": "https://client.replyze.chat/api/v1/knowledge/search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $fromAI('query', 'What to look up, as a short question or keywords (2 to 500 characters)', 'string') }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "70ed4b1b-49db-4708-ab1a-363986af9ca4",
+      "name": "search_knowledge_base",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.2,
+      "position": [
+        2700,
+        380
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "replyzeApiKey",
+          "name": "Replyze API key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "description": "Hands the conversation to a person on the team. Call it when the knowledge base has no answer, when the customer asks for a person, or when the request needs a human decision. Input: one short sentence saying why.",
+        "jsCode": "// The handoff itself (tag, note, assignment) happens after the agent, in\n// the nodes under \"Hand off?\". This only tells the agent it worked.\nreturn 'Done: the conversation is now with the team. Tell the customer that a teammate will reply here soon.';"
+      },
+      "id": "5986b79d-0df1-47e9-ac0b-eb200cbf263d",
+      "name": "hand_off_to_human",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1.3,
+      "position": [
+        2860,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The agent's reply, and whether it called hand_off_to_human.\n// This node also receives the agent's error output: when the model fails or\n// says nothing, the visitor gets your fallback reply and the team gets the chat.\nconst asked = $('Should the AI answer?').first().json;\nconst settings = $('Settings').first().json;\nconst result = $input.first().json;\n\nconst steps = Array.isArray(result.intermediateSteps) ? result.intermediateSteps : [];\nconst handoffStep = steps.find((s) => s && s.action && s.action.tool === 'hand_off_to_human');\nconst inputText = (input) => typeof input === 'string' ? input\n  : input && typeof input === 'object' ? String(input.input || input.query || input.reason || JSON.stringify(input))\n  : '';\n\nlet reply = typeof result.output === 'string' ? result.output.trim() : '';\nlet handoff = Boolean(handoffStep);\nlet reason = handoffStep ? inputText(handoffStep.action.toolInput) : '';\n\nif (!reply) {\n  const error = result.error ? (result.error.message || String(result.error)) : '';\n  handoff = true;\n  reason = error ? 'The AI agent failed: ' + error : 'The AI agent gave no answer.';\n  reply = settings.fallbackReply;\n}\n\nreturn [{\n  json: {\n    conversationId: asked.conversationId,\n    messageId: asked.messageId,\n    reply,\n    handoff,\n    reason: handoff ? (reason || 'The AI agent handed it over.') : null,\n    checkSince: asked.checkSince,\n  },\n}];"
+      },
+      "id": "67153de5-5a3a-433d-a1be-6f055cdc0c1d",
+      "name": "Agent answer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3000,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://client.replyze.chat/api/v1/conversations/{{ $json.conversationId }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "updated_since",
+              "value": "={{ $json.checkSince }}"
+            },
+            {
+              "name": "include_notes",
+              "value": "false"
+            },
+            {
+              "name": "limit",
+              "value": "100"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "cursor",
+                    "value": "={{ $response.body.next_cursor }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.has_more }}",
+              "limitPagesFetched": true,
+              "maxRequests": 5,
+              "requestInterval": 0
+            }
+          }
+        }
+      },
+      "id": "953816c3-b1f6-4162-af51-e35a1e31e512",
+      "name": "Check again before sending",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3220,
+        160
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "replyzeApiKey",
+          "name": "Replyze API key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// The model took a few seconds. Before anything goes out, make sure nobody\n// answered meanwhile (Replyze's AI, a teammate, or another run of this\n// workflow for a retried event) and that the visitor didn't write again.\nconst answer = $('Agent answer').first().json;\nconst pages = $input.all().map((item) => item.json);\nconst readAll = pages.length > 0 && pages[pages.length - 1].has_more === false;\nconst newer = pages.flatMap((page) => page.data || []).filter((m) => m.id > answer.messageId);\nconst visitorAgain = newer.some((m) => m.sender_type === 'visitor');\nconst answered = newer.some((m) => (m.sender_type === 'agent' || m.sender_type === 'bot') && !m.is_internal_note);\n\nreturn [{\n  json: {\n    ...answer,\n    send: readAll && !visitorAgain && !answered,\n    skipReason: !readAll ? 'Too many new messages to check.'\n      : visitorAgain ? 'The visitor wrote again while the agent was answering.'\n      : answered ? 'Someone answered while the agent was answering.' : null,\n  },\n}];"
+      },
+      "id": "baff2e0f-4de6-428c-af31-5ce8de1adbb6",
+      "name": "Still unanswered?",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3440,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "1d9e93e6-55cb-48c4-a9b5-8c4b4282b4d9",
+              "leftValue": "={{ $json.send }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "18decb17-c06a-4a39-a003-60431a59eadc",
+      "name": "Send?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3660,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "81f35e3c-ca4f-40aa-a963-485e3658658f",
+              "leftValue": "={{ $json.handoff }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "ae01d4c4-cf41-47ba-abb1-30f74f76cf81",
+      "name": "Hand off?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3880,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://client.replyze.chat/api/v1/conversations/{{ $('Still unanswered?').first().json.conversationId }}/tags",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ name: $('Settings').first().json.handoffTag }) }}",
+        "options": {}
+      },
+      "id": "84918335-8a34-420f-a0b4-3688727fea35",
+      "name": "Tag for the team",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4100,
+        -20
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "replyzeApiKey",
+          "name": "Replyze API key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://client.replyze.chat/api/v1/conversations/{{ $('Still unanswered?').first().json.conversationId }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Idempotency-Key",
+              "value": "=n8n-note-{{ $('Still unanswered?').first().json.messageId }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ type: 'note', content: 'The n8n AI agent handed this conversation to the team. Reason: ' + $('Still unanswered?').first().json.reason }) }}",
+        "options": {}
+      },
+      "id": "29a94136-f003-48ce-a81c-1949712255d0",
+      "name": "Note for the team",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4320,
+        -20
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "replyzeApiKey",
+          "name": "Replyze API key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "8a7edc6c-f442-4b79-af16-c24b824cfdb3",
+              "leftValue": "={{ String($('Settings').first().json.handoffAgentId || '').trim() !== '' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "e86b201d-b48e-4bc3-a6a5-39e9e82b7d72",
+      "name": "Assign a teammate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4540,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://client.replyze.chat/api/v1/conversations/{{ $('Still unanswered?').first().json.conversationId }}/assign",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ agent_id: Number($('Settings').first().json.handoffAgentId) }) }}",
+        "options": {}
+      },
+      "id": "2723914b-e500-45c5-a185-91629848d33b",
+      "name": "Assign",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4760,
+        -100
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "replyzeApiKey",
+          "name": "Replyze API key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://client.replyze.chat/api/v1/conversations/{{ $('Still unanswered?').first().json.conversationId }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Idempotency-Key",
+              "value": "=n8n-reply-{{ $('Still unanswered?').first().json.messageId }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ content: $('Still unanswered?').first().json.reply }) }}",
+        "options": {}
+      },
+      "id": "9552f26f-1957-4182-a329-c14b6d9d5626",
+      "name": "Send the reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5000,
+        160
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "replyzeApiKey",
+          "name": "Replyze API key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## AI support agent with human handoff\n\nAnswers your website visitors in the **Replyze chat widget** with an n8n AI Agent, from your Replyze knowledge base, and hands the chat to your team when it should.\n\n**Set up**\n1. Replyze → Settings → Integrations → Developer: make an API key with **Conversations: Read & write** and **Knowledge base: Read**. Put it in the **Replyze API key** credential (Bearer Auth).\n2. Publish this workflow and copy the **Production URL** of \"Replyze webhook\".\n3. Same page in Replyze: **Add Webhook** with that URL and the event `message.created`. Copy the signing secret into the **Replyze webhook secret: AI agent** credential (Crypto, field \"Hmac Secret\").\n4. Add your OpenAI key to **OpenAI account**, or swap the model node for another chat model.\n5. Turn off Replyze's own AI agent, or visitors get two answers: in Replyze, **AI Agent** → the switch at the top of the page → **Turn off** (owner or admin). More in the README, \"Avoid double replies\".\n\nYour options are in **Settings**. Full guide: github.com/Replyze/n8n-chat-widget",
+        "width": 620,
+        "height": 500,
+        "color": 4
+      },
+      "id": "7013af4c-42fe-4380-aa9e-8b0affc4f521",
+      "name": "Note: Setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -260
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Why it never answers itself\nOnly `message.created` from `sender_type: \"visitor\"` with `type: \"text\"` goes on. This workflow's own replies come back as `sender_type: \"agent\"` and stop here.",
+        "width": 420,
+        "height": 160,
+        "color": 7
+      },
+      "id": "6ebb8b64-49c9-4eda-af94-34518f7cf601",
+      "name": "Note: Loop guard",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1060,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### When a person has the chat\n\"Should the AI answer?\" steps back when the conversation has the handoff tag, is assigned to a teammate (`stopWhenAssigned`), a teammate has replied, or it isn't open.",
+        "width": 460,
+        "height": 170,
+        "color": 7
+      },
+      "id": "056c3540-052c-45c4-ac9b-5dd7599c7598",
+      "name": "Note: Takeover",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1940,
+        40
+      ]
+    }
+  ],
+  "connections": {
+    "Replyze webhook": {
+      "main": [
+        [
+          {
+            "node": "Raw body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Raw body": {
+      "main": [
+        [
+          {
+            "node": "Sign the raw body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sign the raw body": {
+      "main": [
+        [
+          {
+            "node": "Check signature, age and id",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check signature, age and id": {
+      "main": [
+        [
+          {
+            "node": "Answer Replyze",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Answer Replyze": {
+      "main": [
+        [
+          {
+            "node": "Handle it?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle it?": {
+      "main": [
+        [
+          {
+            "node": "Read the event",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Read the event": {
+      "main": [
+        [
+          {
+            "node": "From the visitor?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "From the visitor?": {
+      "main": [
+        [
+          {
+            "node": "Settings",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Settings": {
+      "main": [
+        [
+          {
+            "node": "Get the conversation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get the conversation": {
+      "main": [
+        [
+          {
+            "node": "Get recent messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get recent messages": {
+      "main": [
+        [
+          {
+            "node": "Should the AI answer?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should the AI answer?": {
+      "main": [
+        [
+          {
+            "node": "Answer?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Answer?": {
+      "main": [
+        [
+          {
+            "node": "AI support agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "AI support agent": {
+      "main": [
+        [
+          {
+            "node": "Agent answer",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Agent answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI chat model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI support agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "search_knowledge_base": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI support agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "hand_off_to_human": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI support agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agent answer": {
+      "main": [
+        [
+          {
+            "node": "Check again before sending",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check again before sending": {
+      "main": [
+        [
+          {
+            "node": "Still unanswered?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Still unanswered?": {
+      "main": [
+        [
+          {
+            "node": "Send?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send?": {
+      "main": [
+        [
+          {
+            "node": "Hand off?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Hand off?": {
+      "main": [
+        [
+          {
+            "node": "Tag for the team",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send the reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tag for the team": {
+      "main": [
+        [
+          {
+            "node": "Note for the team",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Note for the team": {
+      "main": [
+        [
+          {
+            "node": "Assign a teammate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assign a teammate?": {
+      "main": [
+        [
+          {
+            "node": "Assign",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send the reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assign": {
+      "main": [
+        [
+          {
+            "node": "Send the reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": true
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

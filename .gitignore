@@ -1,0 +1,4 @@
+node_modules/
+.n8n-test/
+.env
+.DS_Store

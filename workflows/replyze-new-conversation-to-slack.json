@@ -1,0 +1,428 @@
+{
+  "name": "Replyze: new conversation to Slack",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "replyze-new-conversation",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "4adc6e0c-42e8-42e6-a913-84e72911f9b6",
+      "name": "Replyze webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        300
+      ],
+      "webhookId": "88f65a70-1e24-4f5a-a349-e83218e2508b"
+    },
+    {
+      "parameters": {
+        "operation": "text",
+        "binaryPropertyName": "data",
+        "destinationKey": "rawBody",
+        "options": {
+          "encoding": "utf8",
+          "stripBOM": false,
+          "keepSource": "both"
+        }
+      },
+      "id": "5e746c5b-d854-460b-a46f-50c82926c29c",
+      "name": "Raw body",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "action": "hmac",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "type": "SHA256",
+        "dataPropertyName": "expectedSignature",
+        "encoding": "hex"
+      },
+      "id": "021f1250-76dd-44ab-a1c2-be16a1306d06",
+      "name": "Sign the raw body",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "credentials": {
+        "crypto": {
+          "id": "replyzeSecretNewConversations",
+          "name": "Replyze webhook secret: new conversations"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Replyze signs only the raw body: X-Replyze-Signature is \"sha256=\" and the hex\n// HMAC-SHA256 of the exact bytes received, keyed with this webhook's signing\n// secret. \"Sign the raw body\" computed that HMAC over the same bytes.\n// X-Replyze-Timestamp and X-Replyze-Event-Id are unsigned copies of the body's\n// created_at and id: anyone who captured a request can send it again with new\n// values in them. So this node reads the time and the id from the signed body.\nconst MAX_AGE_SECONDS = 300;\n\nconst item = $input.first().json;\nconst answer = (status, handle, response, extra = {}) => [{ json: { status, handle, response, ...extra } }];\n\n// 1. The signature, compared as bytes and in constant time: every byte of the\n//    expected value is checked, whatever the first difference.\nconst bytes = (text) => new TextEncoder().encode(text);\nconst expected = bytes('sha256=' + item.expectedSignature);\nconst header = (item.headers || {})['x-replyze-signature'];\nconst given = typeof header === 'string' ? bytes(header) : new Uint8Array(0);\nlet difference = expected.length ^ given.length;\nfor (let i = 0; i < expected.length; i++) {\n  difference |= expected[i] ^ (i < given.length ? given[i] : 0);\n}\nif (difference !== 0) {\n  return answer(401, false, { error: 'The signature does not match.' });\n}\n\n// 2. Signed, so the body can be trusted: parse the exact bytes that were\n//    signed (\"Raw body\") and take the time from them.\nlet event = null;\ntry {\n  event = JSON.parse(item.rawBody);\n} catch (error) {\n  event = null;\n}\nconst now = Date.now();\nconst sentAt = event && typeof event.created_at === 'string' ? Date.parse(event.created_at) : NaN;\nif (!Number.isFinite(sentAt) || Math.abs(now - sentAt) > MAX_AGE_SECONDS * 1000) {\n  return answer(400, false, { error: 'Too old: the event was not created in the last ' + MAX_AGE_SECONDS + ' seconds.' });\n}\n\n// 3. The id, from the body too. An event this workflow has already taken\n//    (Replyze's retry, or a replay) gets 200 and goes no further. The ids are\n//    kept in the workflow's static data for as long as step 2 would let the\n//    event in. n8n saves static data when a run of the published workflow ends.\nconst id = typeof event.id === 'string' ? event.id : '';\nif (id === '') {\n  return answer(400, false, { error: 'The event has no id.' });\n}\nconst memory = $getWorkflowStaticData('global');\nconst seen = {};\nfor (const [key, until] of Object.entries(memory.replyzeEventIds || {})) {\n  if (until >= now) seen[key] = until;\n}\nif (Object.prototype.hasOwnProperty.call(seen, id)) {\n  return answer(200, false, { received: true, duplicate: true }, { eventId: id });\n}\nseen[id] = sentAt + MAX_AGE_SECONDS * 1000;\nmemory.replyzeEventIds = seen;\n\nreturn answer(200, true, { received: true }, { eventId: id, body: event });"
+      },
+      "id": "fefa8749-54fb-4028-a771-61f561444e40",
+      "name": "Check signature, age and id",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.response) }}",
+        "options": {
+          "responseCode": "={{ $json.status }}"
+        }
+      },
+      "id": "95bd8f21-3a32-4b57-aa56-e701137d634a",
+      "name": "Answer Replyze",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "91d91c28-1760-45dc-ab13-18c82d0a5f6e",
+              "leftValue": "={{ $json.handle }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "cf9de4c7-0b66-46a9-a5bc-58520757894c",
+      "name": "Handle it?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Signature, age and duplicates\nOnly the raw body is signed. *Check signature, age and id* compares the HMAC with `X-Replyze-Signature` (bytes, constant time), then reads `created_at` and `id` from that signed body, never from the unsigned `X-Replyze-Timestamp` / `X-Replyze-Event-Id` headers.\n*Answer Replyze*: **401** bad signature, **400** older than 5 minutes, **200** for a duplicate (stops here) and for a new event (goes on).",
+        "width": 640,
+        "height": 220,
+        "color": 7
+      },
+      "id": "d06cd6cb-2268-406c-a662-98984b7fb75d",
+      "name": "Note: replyze-new-conversationverify",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -20,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7b79d528-04a1-4e41-aa8e-a71a1436fb45",
+              "leftValue": "={{ $json.body.event === 'conversation.created' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "8929f461-37c3-4666-a887-b578c8ad1c41",
+      "name": "New conversation?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1100,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://client.replyze.chat/api/v1/conversations/{{ $json.body.data.conversation.id }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "limit",
+              "value": "20"
+            },
+            {
+              "name": "include_notes",
+              "value": "false"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1428280-6328-4fcc-af33-cc34fffac4ee",
+      "name": "Get the first messages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        160
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "replyzeApiKey",
+          "name": "Replyze API key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// conversation.created: the conversation's first message from the visitor or\n// the team. Its payload has no message text, so \"Get the first messages\" read it.\nconst conversation = $('Handle it?').first().json.body.data.conversation;\nconst messages = ($input.first().json.data || []).filter((m) => !m.is_internal_note && m.sender_type !== 'system');\nconst first = messages.find((m) => m.sender_type === 'visitor' || m.sender_type === 'agent');\n\n// A conversation your team started (from the inbox or the API) is no news to your team.\nconst startedByVisitor = Boolean(first && first.sender_type === 'visitor');\n\nconst contact = conversation.contact || {};\nconst who = contact.name || contact.email || contact.phone || 'A visitor';\nconst channels = { web: 'website chat', email: 'email', whatsapp: 'WhatsApp', telegram: 'Telegram', facebook: 'Messenger', messenger: 'Messenger', instagram: 'Instagram' };\nconst channel = channels[conversation.channel] || conversation.channel;\nconst words = first && first.content ? first.content.trim() : '(no text: a file or an image)';\nconst quote = (words.length > 500 ? words.slice(0, 500) + '…' : words).split('\\n').map((line) => '> ' + line).join('\\n');\n\nreturn [{\n  json: {\n    startedByVisitor,\n    text: '*New ' + channel + ' conversation* from ' + who + '\\n' + quote + '\\n<' + conversation.url + '|Open it in Replyze>',\n  },\n}];"
+      },
+      "id": "febab76d-6a6b-4542-af4a-aa0fd2f4eba7",
+      "name": "Write the Slack message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "8b7e7684-fc92-4a0a-a51b-be2d69c6ccf2",
+              "leftValue": "={{ $json.startedByVisitor }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "3d0870ed-6058-457d-a0be-196c4baa8112",
+      "name": "Started by the visitor?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1760,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {}
+      },
+      "id": "50c4206b-b8fd-48f4-ab2e-3d8beb021318",
+      "name": "Post to Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1980,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## New conversation → Slack\n\nPosts every new conversation from your **Replyze chat widget** (and email, WhatsApp, Telegram) to a Slack channel, with the visitor's first message and a link to the inbox.\n\n**Set up**\n1. Replyze → Settings → Integrations → Developer: an API key with **Conversations: Read**, in the **Replyze API key** credential (Bearer Auth).\n2. In Slack, create an incoming webhook for your channel and paste its URL into **Post to Slack**. (Or replace that node with the Slack, Telegram, Microsoft Teams or Gmail node.)\n3. Publish this workflow and copy the Production URL of \"Replyze webhook\".\n4. In Replyze, **Add Webhook** with that URL and the event `conversation.created`. Put its signing secret in **Replyze webhook secret: new conversations** (Crypto, \"Hmac Secret\").",
+        "width": 620,
+        "height": 420,
+        "color": 4
+      },
+      "id": "7013af4c-42fe-4380-aa9e-8b0affc4f521",
+      "name": "Note: Setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -240
+      ]
+    }
+  ],
+  "connections": {
+    "Replyze webhook": {
+      "main": [
+        [
+          {
+            "node": "Raw body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Raw body": {
+      "main": [
+        [
+          {
+            "node": "Sign the raw body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sign the raw body": {
+      "main": [
+        [
+          {
+            "node": "Check signature, age and id",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check signature, age and id": {
+      "main": [
+        [
+          {
+            "node": "Answer Replyze",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Answer Replyze": {
+      "main": [
+        [
+          {
+            "node": "Handle it?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle it?": {
+      "main": [
+        [
+          {
+            "node": "New conversation?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "New conversation?": {
+      "main": [
+        [
+          {
+            "node": "Get the first messages",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Get the first messages": {
+      "main": [
+        [
+          {
+            "node": "Write the Slack message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write the Slack message": {
+      "main": [
+        [
+          {
+            "node": "Started by the visitor?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Started by the visitor?": {
+      "main": [
+        [
+          {
+            "node": "Post to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": true
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
